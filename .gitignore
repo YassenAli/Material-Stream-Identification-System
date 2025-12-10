@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+
+.vscode/
+
+data/raw/
+data/augmented/
+data/features/
+
+saved_models/*.pkl
+.ipynb_checkpoints/
+.DS_Store
