@@ -13,3 +13,4 @@ saved_models/*.pkl
 
 dataset/
 mlvenv/
+dataset.zip
