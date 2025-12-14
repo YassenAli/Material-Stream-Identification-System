@@ -568,9 +568,14 @@ def main(quick_mode=False):
         return
     
     # Step 2: Hyperparameter tuning
-    print("\n" + "🎯" * 35)
-    best_params, grid_search = tune_svm_hyperparameters(X_train, y_train, quick_mode=quick_mode)
-    analyze_hyperparameter_impact(grid_search)
+    # print("\n" + "🎯" * 35)
+    # best_params, grid_search = tune_svm_hyperparameters(X_train, y_train, quick_mode=quick_mode)
+    # analyze_hyperparameter_impact(grid_search)
+    best_params = {
+        "C": 10,
+        "gamma": "auto",
+        "kernel": "rbf"
+    }
     
     # Step 3: Train final model
     svm_model = train_final_svm(X_train, y_train, best_params)
