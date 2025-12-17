@@ -33,7 +33,7 @@ MODELS_DIR = 'saved_models'
 IMAGE_SIZE = (128, 128)  # Resize all images to this size
 
 # HOG parameters
-HOG_ORIENTATIONS = 9
+HOG_ORIENTATIONS = 9 
 HOG_PIXELS_PER_CELL = (8, 8)
 HOG_CELLS_PER_BLOCK = (2, 2)
 
@@ -150,10 +150,10 @@ def extract_combined_features(image):
     # Extract individual features
     hog_features = extract_hog_features(image)
     color_features = extract_color_histogram_features(image)
-    lbp_features = extract_lbp_features(image)
+    # lbp_features = extract_lbp_features(image)
     
     # Concatenate all features
-    combined_features = np.concatenate([hog_features, color_features, lbp_features])
+    combined_features = np.concatenate([hog_features, color_features])
     
     return combined_features
 

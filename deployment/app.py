@@ -1,5 +1,10 @@
 import cv2
 import time
+import sys
+import os
+
+# Add src directory to Python path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 from camera.camera import Camera
 from feature_extraction.extractor import FeatureExtractor
@@ -9,8 +14,7 @@ def main():
 
     camera = Camera()
     extractor = FeatureExtractor()
-    path_to_model = "models/classifier.joblib" # to be adjusted
-    predictor = Predictor(path_to_model)
+    predictor = Predictor()  # model_path is now ignored, but kept for compatibility
 
     # initialize FPS calculation
     prev_time = time.perf_counter()
@@ -28,8 +32,6 @@ def main():
         curr_time = time.perf_counter()
         fps = 1 / (curr_time - prev_time)
         prev_time = curr_time
-
-
 
         # --- Visualization
         text = f"Class: {classLabel} | Conf: {confidence:.2f} | FPS: {fps:.1f}"
