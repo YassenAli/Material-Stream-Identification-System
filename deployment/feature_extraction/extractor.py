@@ -13,10 +13,10 @@ from src.preprocessing.feature_extractor import extract_combined_features, IMAGE
 
 class FeatureExtractor:
     def __init__(self):
-        # Load the feature scaler for normalization
         # Calculate the correct path to saved_models directory (works from any directory)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         project_root = os.path.join(script_dir, '..', '..')
+        # Load the feature scaler for normalization
         scaler_path = os.path.join(project_root, 'saved_models', 'feature_scaler.pkl')
         with open(scaler_path, 'rb') as f:
             self.scaler = pickle.load(f)
