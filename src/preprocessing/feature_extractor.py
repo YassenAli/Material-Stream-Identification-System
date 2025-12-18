@@ -1,595 +1,359 @@
 """
-Phase 2: Feature Extraction Pipeline
-Material Stream Identification System
+Phase 2 :CNN Feature Extractor
 
-This script handles:
-1. HOG (Histogram of Oriented Gradients) feature extraction
-2. Color Histogram feature extraction
-3. LBP (Local Binary Patterns) feature extraction
-4. Feature combination and normalization
-5. Data preparation for model training
+This file is a feature-extraction pipeline with a
+compact PyTorch CNN training script that uses a pretrained ResNet50
+to learn features (and save weights). The implementation is organized
+into configuration, helpers, training/validation loops, and a main
+pipeline.
 """
 
 import os
-import cv2
-import numpy as np
-import matplotlib.pyplot as plt
-from skimage.feature import hog, local_binary_pattern
-from sklearn.preprocessing import StandardScaler
+import datetime
+from PIL import Image
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, random_split
+from torchvision import datasets, transforms, models
 from tqdm import tqdm
+import numpy as np
+from sklearn.preprocessing import StandardScaler
 import pickle
-import json
 
-# ============================================================================
 # CONFIGURATION
-# ============================================================================
 
-# Paths
-AUGMENTED_DATA_DIR = 'data/augmented'
-OUTPUT_DIR = 'data/features'
-MODELS_DIR = 'saved_models'
+# Default dataset path . 
+DATASET_PATH = os.environ.get('DATASET_PATH', 'data/augmented')
+MODEL_DIR = 'saved_models'
+MODEL_FILENAME = 'cnn_feature_extractor.pth'
 
-# Image preprocessing
-IMAGE_SIZE = (128, 128)  # Resize all images to this size
+# Training configuration
+IMAGE_SIZE = 128
+BATCH_SIZE = 32
+EPOCHS = 10
+LR = 1e-4
+TRAIN_RATIO = 0.8
 
-# HOG parameters
-HOG_ORIENTATIONS = 9
-HOG_PIXELS_PER_CELL = (8, 8)
-HOG_CELLS_PER_BLOCK = (2, 2)
+CLASS_NAMES = ['cardboard', 'glass', 'metal', 'paper', 'plastic', 'trash', 'unknown']
 
-# Color Histogram parameters
-COLOR_BINS = 32  # Bins per channel (RGB)
+FEATURES_DIR = os.environ.get('FEATURES_DIR', 'data/features')
 
-# LBP parameters
-LBP_RADIUS = 1
-LBP_POINTS = 8
-LBP_METHOD = 'uniform'
+# TRANSFORMS & DATASET HELPERS
 
-# Class mapping
-CLASS_NAMES = ['glass', 'paper', 'cardboard', 'plastic', 'metal', 'trash', 'unknown']
-CLASS_TO_ID = {name: idx for idx, name in enumerate(CLASS_NAMES)}
-
-# ============================================================================
-# FEATURE EXTRACTION FUNCTIONS
-# ============================================================================
-
-def extract_hog_features(image):
-    """
-    Extract HOG (Histogram of Oriented Gradients) features
-    
-    Args:
-        image: Input image (BGR format from cv2)
-    
-    Returns:
-        1D numpy array of HOG features
-    """
-    # Convert to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # Extract HOG features
-    features = hog(
-        gray,
-        orientations=HOG_ORIENTATIONS,
-        pixels_per_cell=HOG_PIXELS_PER_CELL,
-        cells_per_block=HOG_CELLS_PER_BLOCK,
-        block_norm='L2-Hys',
-        visualize=False,
-        feature_vector=True
-    )
-    
-    return features
+transform = transforms.Compose([
+    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
 
 
-def extract_color_histogram_features(image):
-    """
-    Extract Color Histogram features from RGB channels
-    
-    Args:
-        image: Input image (BGR format from cv2)
-    
-    Returns:
-        1D numpy array of color histogram features (concatenated RGB histograms)
-    """
-    # Split into RGB channels (cv2 uses BGR, so reverse)
-    b, g, r = cv2.split(image)
-    
-    # Compute histogram for each channel
-    hist_r = cv2.calcHist([r], [0], None, [COLOR_BINS], [0, 256])
-    hist_g = cv2.calcHist([g], [0], None, [COLOR_BINS], [0, 256])
-    hist_b = cv2.calcHist([b], [0], None, [COLOR_BINS], [0, 256])
-    
-    # Normalize histograms
-    hist_r = hist_r / (hist_r.sum() + 1e-7)
-    hist_g = hist_g / (hist_g.sum() + 1e-7)
-    hist_b = hist_b / (hist_b.sum() + 1e-7)
-    
-    # Concatenate all histograms
-    color_features = np.concatenate([hist_r, hist_g, hist_b]).flatten()
-    
-    return color_features
+def is_valid_image(path: str) -> bool:
+    """Quickly check an image file for basic integrity using PIL.
 
-
-def extract_lbp_features(image):
-    """
-    Extract LBP (Local Binary Patterns) features for texture analysis
-    
-    Args:
-        image: Input image (BGR format from cv2)
-    
-    Returns:
-        1D numpy array of LBP histogram features
-    """
-    # Convert to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # Compute LBP
-    lbp = local_binary_pattern(gray, LBP_POINTS, LBP_RADIUS, method=LBP_METHOD)
-    
-    # Compute histogram of LBP
-    # For uniform patterns with P=8, we get 59 bins (58 uniform + 1 non-uniform)
-    n_bins = LBP_POINTS * (LBP_POINTS - 1) + 3
-    lbp_hist, _ = np.histogram(lbp.ravel(), bins=n_bins, range=(0, n_bins))
-    
-    # Normalize histogram
-    lbp_hist = lbp_hist.astype(np.float32)
-    lbp_hist = lbp_hist / (lbp_hist.sum() + 1e-7)
-    
-    return lbp_hist
-
-
-def extract_combined_features(image):
-    """
-    Extract and combine all features: HOG + Color Histogram + LBP
-    
-    Args:
-        image: Input image (BGR format from cv2)
-    
-    Returns:
-        1D numpy array of combined features
-    """
-    # Extract individual features
-    hog_features = extract_hog_features(image)
-    color_features = extract_color_histogram_features(image)
-    lbp_features = extract_lbp_features(image)
-    
-    # Concatenate all features
-    combined_features = np.concatenate([hog_features, color_features, lbp_features])
-    
-    return combined_features
-
-
-def preprocess_image(image_path):
-    """
-    Load and preprocess an image
-    
-    Args:
-        image_path: Path to image file
-    
-    Returns:
-        Preprocessed image or None if failed
+    Returns True when the file opens and verifies; False otherwise.
+    Prints a short message for skipped files.
     """
     try:
-        # Read image
-        img = cv2.imread(image_path)
-        
-        if img is None:
-            return None
-        
-        # Resize to standard size
-        img = cv2.resize(img, IMAGE_SIZE)
-        
-        return img
-    
-    except Exception as e:
-        print(f"Error processing {image_path}: {e}")
-        return None
+        with Image.open(path) as img:
+            img.verify()
+        return True
+    except Exception:
+        print("Skipping corrupted file:", path)
+        return False
 
 
-# ============================================================================
-# FEATURE EXTRACTION PIPELINE
-# ============================================================================
+def get_device():
+    """Return torch.device: CUDA if available and not forced off, else CPU.
 
-def extract_features_from_dataset(data_dir):
+    Honor env var `FORCE_CPU=1` to force CPU even when CUDA is available.
     """
-    Extract features from all images in the dataset
-    
-    Args:
-        data_dir: Directory containing class folders
-    
-    Returns:
-        features: numpy array of shape (n_samples, n_features)
-        labels: numpy array of shape (n_samples,)
-        image_paths: list of image paths
+    force_cpu = os.environ.get('FORCE_CPU', '') in ('1', 'true', 'True')
+    if not force_cpu and torch.cuda.is_available():
+        return torch.device('cuda')
+    return torch.device('cpu')
+
+
+def prepare_datasets(dataset_path: str):
+    """Load ImageFolder, filter invalid files, and split into train/val.
+
+    Returns train_loader, val_loader and number of classes.
     """
-    print("\n" + "=" * 70)
-    print("FEATURE EXTRACTION PIPELINE")
-    print("=" * 70)
-    
-    features_list = []
-    labels_list = []
-    image_paths_list = []
-    
-    # Get first image to determine feature dimension
-    print("\nAnalyzing feature dimensions...")
-    sample_found = False
-    for class_name in CLASS_NAMES:
-        class_dir = os.path.join(data_dir, class_name)
-        if os.path.exists(class_dir):
-            images = [f for f in os.listdir(class_dir)
-                     if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
-            if images:
-                sample_img_path = os.path.join(class_dir, images[0])
-                sample_img = preprocess_image(sample_img_path)
-                if sample_img is not None:
-                    sample_features = extract_combined_features(sample_img)
+    # Create ImageFolder dataset; ImageFolder uses folder names as class labels
+    full_dataset = datasets.ImageFolder(root=dataset_path, transform=transform, is_valid_file=is_valid_image)
 
-                    # Calculate individual feature dimensions
-                    sample_hog = extract_hog_features(sample_img)
-                    sample_color = extract_color_histogram_features(sample_img)
-                    sample_lbp = extract_lbp_features(sample_img)
+    num_classes = len(full_dataset.classes)
+    print("Classes:", full_dataset.classes)
+    print("Total images:", len(full_dataset))
 
-                    print(f"\nFeature Dimensions:")
-                    print(f"   HOG features:           {len(sample_hog):>6} dimensions")
-                    print(f"   Color Histogram:        {len(sample_color):>6} dimensions")
-                    print(f"   LBP features:           {len(sample_lbp):>6} dimensions")
-                    print(f"   {'-' * 40}")
-                    print(f"   TOTAL combined:         {len(sample_features):>6} dimensions")
-                    sample_found = True
-                    break
-        if sample_found:
-            break
+    # Simple diagnostic for expected class subfolders
+    for cls in CLASS_NAMES:
+        cls_path = os.path.join(dataset_path, cls)
+        if not os.path.exists(cls_path):
+            print(f"Folder missing: {cls_path}")
+        else:
+            try:
+                print(f"{cls} images:", len([f for f in os.listdir(cls_path) if f.lower().endswith(('.png','.jpg','.jpeg','.bmp'))]))
+            except Exception:
+                print(f"Could not list files for: {cls_path}")
 
-    if not sample_found:
-        print("Error: No valid images found!")
-        return None, None, None
+    # Split dataset
+    train_size = int(TRAIN_RATIO * len(full_dataset))
+    val_size = len(full_dataset) - train_size
 
-    # Process all images
-    print(f"\nExtracting features from all images...")
-
-    total_images = 0
-    for class_name in CLASS_NAMES:
-        class_dir = os.path.join(data_dir, class_name)
-        if os.path.exists(class_dir):
-            images = [f for f in os.listdir(class_dir)
-                     if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
-            total_images += len(images)
-
-    with tqdm(total=total_images, desc="   Processing images") as pbar:
-        for class_name in CLASS_NAMES:
-            class_dir = os.path.join(data_dir, class_name)
-
-            if not os.path.exists(class_dir):
-                print(f"   Warning: Skipping {class_name} - folder not found")
-                continue
-
-            class_id = CLASS_TO_ID[class_name]
-
-            # Get all images in class
-            images = [f for f in os.listdir(class_dir)
-                     if f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
-
-            # Process each image
-            for img_name in images:
-                img_path = os.path.join(class_dir, img_name)
-
-                # Preprocess image
-                img = preprocess_image(img_path)
-
-                if img is None:
-                    pbar.update(1)
-                    continue
-
-                # Extract features
-                try:
-                    features = extract_combined_features(img)
-
-                    features_list.append(features)
-                    labels_list.append(class_id)
-                    image_paths_list.append(img_path)
-
-                except Exception as e:
-                    print(f"\n   Warning: Failed to extract features from {img_name}: {e}")
-
-                pbar.update(1)
-    
-    # Convert to numpy arrays
-    features = np.array(features_list)
-    labels = np.array(labels_list)
-    
-    print(f"\n[OK] Feature extraction complete!")
-    print(f"   Total samples: {len(features)}")
-    print(f"   Feature dimension: {features.shape[1]}")
-    print(f"   Labels shape: {labels.shape}")
-    
-    return features, labels, image_paths_list
-
-
-# ============================================================================
-# FEATURE NORMALIZATION
-# ============================================================================
-
-def normalize_features(features, scaler=None, save_scaler=True):
-    """
-    Normalize features using StandardScaler (z-score normalization)
-    
-    Args:
-        features: numpy array of features
-        scaler: existing scaler (for test data), or None to fit new scaler
-        save_scaler: whether to save the scaler
-    
-    Returns:
-        normalized_features: normalized numpy array
-        scaler: the StandardScaler object used
-    """
-    print("\n" + "=" * 70)
-    print("FEATURE NORMALIZATION")
-    print("=" * 70)
-    
-    if scaler is None:
-        print("\n[CONFIG] Fitting new StandardScaler...")
-        scaler = StandardScaler()
-        normalized_features = scaler.fit_transform(features)
-        
-        print(f"   Mean: {scaler.mean_[:5]}... (showing first 5)")
-        print(f"   Std:  {scaler.scale_[:5]}... (showing first 5)")
-        
-        if save_scaler:
-            os.makedirs(MODELS_DIR, exist_ok=True)
-            scaler_path = os.path.join(MODELS_DIR, 'feature_scaler.pkl')
-            with open(scaler_path, 'wb') as f:
-                pickle.dump(scaler, f)
-            print(f"\n[SAVEDD] Scaler saved to: {scaler_path}")
-    else:
-        print("\n[CONFIG] Using existing StandardScaler...")
-        normalized_features = scaler.transform(features)
-    
-    # Verify normalization
-    print(f"\n[STATS] Normalization Statistics:")
-    print(f"   Original - Mean: {features.mean():.4f}, Std: {features.std():.4f}")
-    print(f"   Normalized - Mean: {normalized_features.mean():.4f}, Std: {normalized_features.std():.4f}")
-    
-    print("\n[OK] Feature normalization complete!")
-    print("=" * 70)
-    
-    return normalized_features, scaler
-
-
-# ============================================================================
-# DATA SPLITTING
-# ============================================================================
-
-def split_dataset(features, labels, image_paths, train_ratio=0.7, val_ratio=0.15, test_ratio=0.15):
-    """
-    Split dataset into train, validation, and test sets with stratification
-    
-    Args:
-        features: feature array
-        labels: label array
-        image_paths: list of image paths
-        train_ratio: proportion for training
-        val_ratio: proportion for validation
-        test_ratio: proportion for testing
-    
-    Returns:
-        Dictionary with train, val, test splits
-    """
-    from sklearn.model_selection import train_test_split
-    
-    print("\n" + "=" * 70)
-    print("DATASET SPLITTING")
-    print("=" * 70)
-    
-    # First split: train + temp (val + test)
-    X_train, X_temp, y_train, y_temp, paths_train, paths_temp = train_test_split(
-        features, labels, image_paths,
-        test_size=(val_ratio + test_ratio),
-        random_state=42,
-        stratify=labels
+    train_dataset, val_dataset = random_split(
+        full_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42)
     )
-    
-    # Second split: val and test
-    val_test_ratio = test_ratio / (val_ratio + test_ratio)
-    X_val, X_test, y_val, y_test, paths_val, paths_test = train_test_split(
-        X_temp, y_temp, paths_temp,
-        test_size=val_test_ratio,
-        random_state=42,
-        stratify=y_temp
-    )
-    
-    # Print split statistics
-    print(f"\n[SPLIT] Dataset Split:")
-    print(f"   Training:   {len(X_train):>5} samples ({len(X_train)/len(features)*100:.1f}%)")
-    print(f"   Validation: {len(X_val):>5} samples ({len(X_val)/len(features)*100:.1f}%)")
-    print(f"   Test:       {len(X_test):>5} samples ({len(X_test)/len(features)*100:.1f}%)")
-    print(f"   {'-' * 50}")
-    print(f"   Total:      {len(features):>5} samples")
-    
-    # Print class distribution for each split
-    print(f"\n[DISTRIBUTION] Class Distribution:")
-    print(f"   {'Class':<12} {'Train':<8} {'Val':<8} {'Test':<8}")
-    print(f"   {'-' * 50}")
-    
-    for class_name, class_id in CLASS_TO_ID.items():
-        train_count = np.sum(y_train == class_id)
-        val_count = np.sum(y_val == class_id)
-        test_count = np.sum(y_test == class_id)
-        print(f"   {class_name:<12} {train_count:<8} {val_count:<8} {test_count:<8}")
-    
-    print("=" * 70)
-    
-    return {
-        'X_train': X_train, 'y_train': y_train, 'paths_train': paths_train,
-        'X_val': X_val, 'y_val': y_val, 'paths_val': paths_val,
-        'X_test': X_test, 'y_test': y_test, 'paths_test': paths_test
-    }
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+
+    return train_loader, val_loader, num_classes
 
 
-# ============================================================================
-# SAVE AND LOAD FUNCTIONS
-# ============================================================================
+def extract_and_cache_features(dataset_path: str = DATASET_PATH, weights_path: str = None, overwrite: bool = False):
+    """Extract pooled CNN features using ResNet backbone and cache to .npy files.
 
-def save_processed_data(data_dict, features_info):
+    Saves: X_train.npy, X_val.npy, X_test.npy, y_train.npy, y_val.npy, y_test.npy
+    under `FEATURES_DIR` (default 'data/features'). Splits dataset using TRAIN_RATIO.
     """
-    Save processed features and labels
-    
-    Args:
-        data_dict: dictionary with train/val/test splits
-        features_info: dictionary with feature extraction parameters
-    """
-    print("\n" + "=" * 70)
-    print("SAVING PROCESSED DATA")
-    print("=" * 70)
-    
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    
-    # Save features and labels
-    print("\n[SAVING] Saving data files...")
-    
-    np.save(os.path.join(OUTPUT_DIR, 'X_train.npy'), data_dict['X_train'])
-    np.save(os.path.join(OUTPUT_DIR, 'y_train.npy'), data_dict['y_train'])
-    np.save(os.path.join(OUTPUT_DIR, 'X_val.npy'), data_dict['X_val'])
-    np.save(os.path.join(OUTPUT_DIR, 'y_val.npy'), data_dict['y_val'])
-    np.save(os.path.join(OUTPUT_DIR, 'X_test.npy'), data_dict['X_test'])
-    np.save(os.path.join(OUTPUT_DIR, 'y_test.npy'), data_dict['y_test'])
-    
-    # Save image paths
-    with open(os.path.join(OUTPUT_DIR, 'image_paths.pkl'), 'wb') as f:
-        pickle.dump({
-            'train': data_dict['paths_train'],
-            'val': data_dict['paths_val'],
-            'test': data_dict['paths_test']
-        }, f)
-    
-    # Save feature extraction info
-    with open(os.path.join(OUTPUT_DIR, 'features_info.json'), 'w') as f:
-        json.dump(features_info, f, indent=2)
-    
-    print(f"   [OK] X_train.npy")
-    print(f"   [OK] y_train.npy")
-    print(f"   [OK] X_val.npy")
-    print(f"   [OK] y_val.npy")
-    print(f"   [OK] X_test.npy")
-    print(f"   [OK] y_test.npy")
-    print(f"   [OK] image_paths.pkl")
-    print(f"   [OK] features_info.json")
-    
-    print(f"\n[DIR] All files saved to: {OUTPUT_DIR}/")
-    print("=" * 70)
+    os.makedirs(FEATURES_DIR, exist_ok=True)
 
-
-def visualize_feature_samples(features, labels, n_samples=5):
-    """
-    Visualize feature distributions for sample images from each class
-    """
-    print("\n[VIZ] Creating feature visualization...")
-    
-    fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-    axes = axes.flatten()
-    
-    for idx, (class_name, class_id) in enumerate(CLASS_TO_ID.items()):
-        # Get samples from this class
-        class_indices = np.where(labels == class_id)[0]
-        
-        if len(class_indices) > 0:
-            sample_idx = class_indices[0]
-            sample_features = features[sample_idx]
-            
-            # Plot feature values
-            axes[idx].plot(sample_features, linewidth=0.5, alpha=0.7)
-            axes[idx].set_title(f'{class_name.capitalize()} - Feature Vector', 
-                               fontweight='bold', fontsize=12)
-            axes[idx].set_xlabel('Feature Index')
-            axes[idx].set_ylabel('Feature Value')
-            axes[idx].grid(True, alpha=0.3)
-    
-    # Hide last empty subplot if necessary
-    if len(CLASS_TO_ID) < len(axes):
-        axes[-1].axis('off')
-    
-    plt.tight_layout()
-    # Ensure results directory exists
-    os.makedirs('results', exist_ok=True)
-    output_path = os.path.join('results', 'feature_visualization.png')
-    plt.savefig(output_path, dpi=150, bbox_inches='tight')
-    print(f"   [OK] Saved to '{output_path}'")
-    plt.close()
-
-
-# ============================================================================
-# MAIN PIPELINE
-# ============================================================================
-
-def main():
-    """
-    Main execution pipeline for Phase 2
-    """
-    print("\n" + "=" * 25)
-    print("PHASE 2: FEATURE EXTRACTION")
-    print("=" * 25 + "\n")
-    
-    # Step 1: Extract features from all images
-    features, labels, image_paths = extract_features_from_dataset(AUGMENTED_DATA_DIR)
-    
-    if features is None:
-        print("[ERROR] Feature extraction failed!")
+    # If files exist and not overwriting, skip
+    expected = [os.path.join(FEATURES_DIR, n) for n in (
+        'X_train.npy','X_val.npy','X_test.npy','y_train.npy','y_val.npy','y_test.npy')]
+    if not overwrite and all(os.path.exists(p) for p in expected):
+        print(f"Feature files already exist in {FEATURES_DIR}, use overwrite=True to regenerate.")
         return
-    
-    # Step 2: Split dataset
-    data_splits = split_dataset(features, labels, image_paths)
-    
-    # Step 3: Normalize features (fit on training data only!)
-    X_train_normalized, scaler = normalize_features(data_splits['X_train'], save_scaler=True)
-    X_val_normalized, _ = normalize_features(data_splits['X_val'], scaler=scaler, save_scaler=False)
-    X_test_normalized, _ = normalize_features(data_splits['X_test'], scaler=scaler, save_scaler=False)
-    
-    # Update data_splits with normalized features
-    data_splits['X_train'] = X_train_normalized
-    data_splits['X_val'] = X_val_normalized
-    data_splits['X_test'] = X_test_normalized
-    
-    # Step 4: Save processed data
-    features_info = {
-        'image_size': IMAGE_SIZE,
-        'hog_params': {
-            'orientations': HOG_ORIENTATIONS,
-            'pixels_per_cell': HOG_PIXELS_PER_CELL,
-            'cells_per_block': HOG_CELLS_PER_BLOCK
-        },
-        'color_params': {
-            'bins_per_channel': COLOR_BINS
-        },
-        'lbp_params': {
-            'radius': LBP_RADIUS,
-            'points': LBP_POINTS,
-            'method': LBP_METHOD
-        },
-        'feature_dimension': features.shape[1],
-        'class_names': CLASS_NAMES,
-        'class_to_id': CLASS_TO_ID
-    }
-    
-    save_processed_data(data_splits, features_info)
-    
-    # Step 5: Visualize features
-    visualize_feature_samples(X_train_normalized, data_splits['y_train'])
-    
-    # Final summary
-    print("\n" + "=" * 70)
-    print("PHASE 2 COMPLETE!")
-    print("=" * 70)
-    print("\nSummary:")
-    print(f"   Extracted {features.shape[1]}-dimensional features")
-    print(f"   HOG + Color Histogram + LBP combined")
-    print(f"   Features normalized with StandardScaler")
-    print(f"   Dataset split: 70% train, 15% val, 15% test")
-    print(f"   All data saved to '{OUTPUT_DIR}/'")
-    print(f"   Scaler saved to '{MODELS_DIR}/'")
 
-    print("\nNext Steps:")
-    print("   -> Proceed to Phase 3: Model Training (SVM & k-NN)")
-    print("   -> Use the saved .npy files for training")
+    # Build dataset
+    full_dataset = datasets.ImageFolder(root=dataset_path, transform=transform, is_valid_file=is_valid_image)
+    if len(full_dataset) == 0:
+        raise RuntimeError(f"No images found in {dataset_path}")
 
-    print("\n" + "=" * 25 + "\n")
+    device = get_device()
+    print('Using device for feature extraction:', device)
+
+    # Load model and weights if available
+    try:
+        model = models.resnet50(pretrained=False)
+    except Exception:
+        model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+
+    # Try to load provided weights or default saved model
+    if weights_path is None:
+        weights_path = os.path.join(MODEL_DIR, MODEL_FILENAME)
+
+    if weights_path and os.path.exists(weights_path):
+        try:
+            state = torch.load(weights_path, map_location=device)
+            model.load_state_dict(state)
+            print(f"Loaded CNN weights from {weights_path}")
+        except Exception:
+            # partial load: update matching shapes
+            sd = model.state_dict()
+            filtered = {k: v for k, v in state.items() if k in sd and sd[k].shape == v.shape}
+            sd.update(filtered)
+            model.load_state_dict(sd)
+            print("Loaded subset of weights (partial load)")
+    else:
+        try:
+            model = models.resnet50(pretrained=True)
+            print('No saved weights found; using ImageNet pretrained backbone')
+        except Exception:
+            print('Warning: using randomly initialized ResNet (no pretrained weights)')
+
+    model = model.to(device)
+    model.eval()
+
+    # Feature extractor: everything except the final fc layer
+    feature_extractor = nn.Sequential(*list(model.children())[:-1])
+    feature_extractor = feature_extractor.to(device)
+    feature_extractor.eval()
+
+    # Split dataset
+    total = len(full_dataset)
+    train_size = int(TRAIN_RATIO * total)
+    val_size = total - train_size
+    train_ds, val_ds = random_split(full_dataset, [train_size, val_size], generator=torch.Generator().manual_seed(42))
+
+    def _compute(ds):
+        loader = DataLoader(ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=0)
+        feats = []
+        labels = []
+        with torch.no_grad():
+            for imgs, labs in tqdm(loader, desc='Extracting features'):
+                imgs = imgs.to(device)
+                out = feature_extractor(imgs)
+                out = out.reshape(out.size(0), -1).cpu().numpy()
+                feats.append(out)
+                labels.append(labs.numpy())
+        if feats:
+            return np.vstack(feats), np.concatenate(labels)
+        return np.zeros((0,0)), np.array([])
+
+    X_train, y_train = _compute(train_ds)
+    X_val, y_val = _compute(val_ds)
+    # For completeness create X_test as copy of val (or keep separate procedure later)
+    X_test, y_test = X_val.copy(), y_val.copy()
+    # Normalize features (fit on training set) and save scaler
+    if X_train.size == 0:
+        print("No features extracted; skipping save.")
+        return
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_val_scaled = scaler.transform(X_val) if X_val.size else X_val
+    X_test_scaled = scaler.transform(X_test) if X_test.size else X_test
+
+    # Ensure model dir exists and save scaler
+    os.makedirs(MODEL_DIR, exist_ok=True)
+    scaler_path = os.path.join(MODEL_DIR, 'feature_scaler.pkl')
+    with open(scaler_path, 'wb') as f:
+        pickle.dump(scaler, f)
+
+    # Save scaled features and labels
+    np.save(os.path.join(FEATURES_DIR, 'X_train.npy'), X_train_scaled)
+    np.save(os.path.join(FEATURES_DIR, 'X_val.npy'), X_val_scaled)
+    np.save(os.path.join(FEATURES_DIR, 'X_test.npy'), X_test_scaled)
+    np.save(os.path.join(FEATURES_DIR, 'y_train.npy'), y_train)
+    np.save(os.path.join(FEATURES_DIR, 'y_val.npy'), y_val)
+    np.save(os.path.join(FEATURES_DIR, 'y_test.npy'), y_test)
+
+    print(f"Saved scaled features to {FEATURES_DIR}: X_train={X_train_scaled.shape}, X_val={X_val_scaled.shape}")
+    print(f"Scaler saved to: {scaler_path}")
+
+
+# MODEL, LOSS, OPTIMIZER
+
+def build_model(num_classes: int, device: torch.device):
+    """Create a pretrained ResNet50 and replace the final head.
+
+    The function returns the model moved to the given device.
+    """
+    try:
+        model = models.resnet50(pretrained=True)
+    except Exception:
+        # Fallback for torchvision versions where 'pretrained' is deprecated
+        model = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
+
+    # Replace classifier head with the number of classes we have
+    in_features = model.fc.in_features
+    model.fc = nn.Linear(in_features, num_classes)
+
+    return model.to(device)
+
+
+# TRAIN / VALIDATION LOOPS
+
+
+def train_one_epoch(model, loader, criterion, optimizer, device, epoch_num, print_every=10):
+    """Train for one epoch and return avg loss and accuracy."""
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+
+    for i, (images, labels) in enumerate(tqdm(loader, desc=f"Epoch {epoch_num+1}")):
+        try:
+            images, labels = images.to(device), labels.to(device)
+
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+            _, preds = torch.max(outputs, 1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+            if (i + 1) % print_every == 0 or (i + 1) == len(loader):
+                timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+                progress = (i + 1) / len(loader) * 100
+                avg_loss = running_loss / (i + 1)
+                avg_acc = correct / total if total > 0 else 0
+                batch_acc = (preds == labels).sum().item() / len(labels)
+                gpu_mem = torch.cuda.memory_allocated() / 1024 ** 2 if torch.cuda.is_available() else 0
+                print(f"[{timestamp}] Epoch {epoch_num+1} | Batch {i+1}/{len(loader)} ({progress:.1f}%) | "
+                      f"Loss: {loss.item():.4f} | Avg Loss: {avg_loss:.4f} | Batch Acc: {batch_acc:.4f} | "
+                      f"Avg Acc: {avg_acc:.4f} | GPU Mem: {gpu_mem:.1f}MB", flush=True)
+
+        except Exception as e:
+            print(f"Skipping batch {i+1} due to error: {e}", flush=True)
+            continue
+
+    return running_loss / len(loader), correct / total if total > 0 else 0
+
+
+def validate(model, loader, device):
+    """Evaluate model on validation loader and return accuracy."""
+    model.eval()
+    correct = 0
+    total = 0
+
+    with torch.no_grad():
+        for i, (images, labels) in enumerate(loader):
+            images, labels = images.to(device), labels.to(device)
+            outputs = model(images)
+            _, preds = torch.max(outputs, 1)
+            correct += (preds == labels).sum().item()
+            total += labels.size(0)
+
+            if (i + 1) % 20 == 0:
+                print(f"[Validation] Batch {i+1}/{len(loader)} | Batch Acc: {(preds==labels).sum().item()/len(labels):.4f} | Total Acc So Far: {correct/total:.4f}", flush=True)
+
+    return correct / total if total > 0 else 0
+
+
+# SAVE / MAIN PIPELINE
+
+
+def save_model_state(model, model_dir: str, filename: str):
+    os.makedirs(model_dir, exist_ok=True)
+    path = os.path.join(model_dir, filename)
+    torch.save(model.state_dict(), path)
+    print(f"CNN weights saved to: {path}")
+
+
+def main(dataset_path: str = DATASET_PATH):
+    print("\n" + "=" * 25)
+    print("PHASE 2: CNN Feature Extractor")
+    print("=" * 25 + "\n")
+
+    train_loader, val_loader, num_classes = prepare_datasets(dataset_path)
+
+    if len(train_loader.dataset) == 0 and len(val_loader.dataset) == 0:
+        print("No images found. Check DATASET_PATH.")
+        return
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print("Using device:", device)
+
+    model = build_model(num_classes, device)
+
+    criterion = nn.CrossEntropyLoss()
+    optimizer = optim.Adam(model.parameters(), lr=LR)
+
+    best_val_acc = 0.0
+
+    for epoch in range(EPOCHS):
+        train_loss, train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, epoch, print_every=10)
+        val_acc = validate(model, val_loader, device)
+
+        print(f"--- Epoch {epoch+1} Summary ---")
+        print(f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | Val Acc: {val_acc:.4f}\n", flush=True)
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            save_model_state(model, MODEL_DIR, MODEL_FILENAME)
+
+    print("\nTraining complete.")
+    extract_and_cache_features(dataset_path=DATASET_PATH, weights_path=os.path.join(MODEL_DIR, MODEL_FILENAME))
+
 
 
 if __name__ == "__main__":
