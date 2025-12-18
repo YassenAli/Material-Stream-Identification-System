@@ -23,7 +23,7 @@ import shutil
 # ============================================================================
 
 # Paths
-ORIGINAL_DATA_DIR = 'dataset'  # Your original dataset folder
+ORIGINAL_DATA_DIR = 'data/raw'  # Your original dataset folder
 AUGMENTED_DATA_DIR = 'data/augmented'  # Output folder
 TARGET_IMAGES_PER_CLASS = 500  # Target number of images per class
 
