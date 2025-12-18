@@ -5,13 +5,7 @@
     "kernel": "rbf"
   },
   "optimal_threshold": 0.3,
-  "results": {
-    "train_accuracy": 0.9995659722222222,
-    "val_accuracy": 0.611336032388664,
-    "test_accuracy": 0.5850202429149798,
-    "feature_dimension": 8255,
-    "training_samples": 2304
-  },
+  "feature_dimension": 2048,
   "class_names": [
     "glass",
     "paper",
